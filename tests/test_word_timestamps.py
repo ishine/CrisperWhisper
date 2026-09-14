@@ -205,6 +205,98 @@ class TestGroupedWordDecode:
         assert "\ufffd" not in texts[0]
 
 
+class _StubByteTableEngine:
+    """Byte-level decode stub: each id maps to raw UTF-8 bytes, so partial
+    codepoints decode to U+FFFD exactly like the real tokenizer."""
+
+    def __init__(self, table):
+        self._table = table
+
+    def decode_tokens(self, token_ids, skip_special=True):
+        data = b"".join(self._table[int(t)] for t in token_ids)
+        return data.decode("utf-8", errors="replace")
+
+
+class TestSpacelessLanguageGrouping:
+    """Issue #58: Japanese (and other space-less languages) must not
+    collapse into a single word."""
+
+    # Hiragana with BPE-style splits: the first char split 2+1 bytes, the
+    # third+fourth split after char 3 + 2 partial bytes of char 4; the
+    # rest are whole tokens.
+    _KO = "こ"   # こ
+    _N = "ん"    # ん
+    _NI = "に"   # に
+    _CHI = "ち"  # ち
+    _HA = "は"   # は
+
+    @property
+    def _table(self):
+        return {
+            1: self._KO.encode()[:2],
+            2: self._KO.encode()[2:],
+            3: self._N.encode(),
+            4: self._NI.encode() + self._CHI.encode()[:2],
+            5: self._CHI.encode()[2:],
+            6: self._HA.encode(),
+            7: b"[sigh]",
+            220: b" ",
+        }
+
+    def _pieces(self, ids):
+        return [self._table[i].decode("utf-8", errors="replace") for i in ids]
+
+    def test_unicode_grouping_splits_at_codepoints(self):
+        from crisperwhisper.word_timing import group_tokens_into_words_unicode
+
+        ids = [1, 2, 3, 4, 5, 6]
+        engine = _StubByteTableEngine(self._table)
+        word_idx, texts = group_tokens_into_words_unicode(
+            engine, ids, self._pieces(ids),
+        )
+        assert texts == [self._KO, self._N, self._NI + self._CHI, self._HA]
+        assert word_idx == [[0, 1], [2], [3, 4], [5]]
+        assert all("�" not in t for t in texts)
+
+    def test_event_tags_and_space_tokens(self):
+        from crisperwhisper.word_timing import group_tokens_into_words_unicode
+
+        # [sigh] token and an explicit space token between characters.
+        ids = [7, 3, 220, 6]
+        engine = _StubByteTableEngine(self._table)
+        _, texts = group_tokens_into_words_unicode(
+            engine, ids, self._pieces(ids),
+        )
+        assert texts == ["[sigh]", self._N, self._HA]
+
+    def test_dispatch_by_language(self):
+        from crisperwhisper.word_timing import (
+            SPACELESS_LANGUAGES,
+            segment_tokens_into_words,
+        )
+
+        assert "ja" in SPACELESS_LANGUAGES and "zh" in SPACELESS_LANGUAGES
+
+        ids = [1, 2, 3, 4, 5, 6]
+        engine = _StubByteTableEngine(self._table)
+        pieces = self._pieces(ids)
+
+        _, ja_texts = segment_tokens_into_words(
+            engine, ids, pieces, language="ja",
+        )
+        assert len(ja_texts) == 4  # codepoint-boundary words
+
+        # Space-based grouping (the pre-fix behaviour) collapses the same
+        # sequence into one giant word -- exactly the issue #58 symptom.
+        _, en_texts = segment_tokens_into_words(
+            engine, ids, pieces, language="en",
+        )
+        assert len(en_texts) == 1
+
+        _, default_texts = segment_tokens_into_words(engine, ids, pieces)
+        assert len(default_texts) == 1
+
+
 # ---------------------------------------------------------------------------
 # End-to-end CrisperWhisper test: requires GPU + converted model.
 # The ``model``/``spec_model``/``en_audio`` fixtures live in conftest.py and

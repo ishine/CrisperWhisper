@@ -146,7 +146,7 @@ def decode_with_coverage_fallback(
                 pass  # couldn't get reference -> trust the mel pre-filter
 
     # Lazy import to avoid a hard dependency cycle.
-    from crisperwhisper.hallucination import find_token_loop
+    from crisperwhisper.loop_detection import find_token_loop
 
     best_ids, best_n = gen_ids, base_n
     best_is_sampled = False

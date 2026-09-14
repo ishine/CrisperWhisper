@@ -81,11 +81,18 @@ class TestConversionDepsPreflight:
         self, tmp_path, monkeypatch,
     ):
         import sys
+        import types
 
         from crisperwhisper.converter import ensure_ct2_model
 
         # Simulate an environment without the conversion deps: a None entry
-        # in sys.modules makes ``import torch`` raise ImportError.
+        # in sys.modules makes ``import torch`` raise ImportError.  The
+        # converter checks ctranslate2 before the torch/transformers
+        # preflight, so stub it in to keep this test about the [convert]
+        # message on transformers-only installs too (issue #57).
+        monkeypatch.setitem(
+            sys.modules, "ctranslate2", types.ModuleType("ctranslate2"),
+        )
         monkeypatch.setitem(sys.modules, "torch", None)
         monkeypatch.setitem(sys.modules, "transformers", None)
 

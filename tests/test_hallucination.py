@@ -2,7 +2,7 @@
 
 import pytest
 
-from crisperwhisper.hallucination import find_token_loop
+from crisperwhisper.loop_detection import find_token_loop
 
 
 class TestFindTokenLoop:
@@ -56,3 +56,21 @@ class TestFindTokenLoop:
         # but sub-patterns might not exist
         # The 6-gram repeats but max_ngram=3 won't catch it
         assert result is None
+
+
+class TestCt2FreeImport:
+    """Issue #57: the loop detector must be importable (and the re-export
+    modules loadable) on a transformers-only install without ctranslate2."""
+
+    def test_loop_detection_imports_without_ctranslate2(self, monkeypatch):
+        import importlib
+        import sys
+
+        # A None entry makes ``import ctranslate2`` raise ImportError.
+        monkeypatch.setitem(sys.modules, "ctranslate2", None)
+        monkeypatch.delitem(
+            sys.modules, "crisperwhisper.loop_detection", raising=False,
+        )
+        mod = importlib.import_module("crisperwhisper.loop_detection")
+        assert mod.find_token_loop([1, 1, 1, 1], reps=3) == (0, (1,))
+        assert 1 in mod.DEFAULT_REPAIR_THRESHOLDS
