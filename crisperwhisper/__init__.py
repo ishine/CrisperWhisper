@@ -25,7 +25,7 @@ __all__ = [
     "DEFAULT_MODEL",
     "OFFICIAL_MODELS",
 ]
-__version__ = "2.0.2"
+__version__ = "2.0.3"
 
 
 def check_speculative_support() -> None:
