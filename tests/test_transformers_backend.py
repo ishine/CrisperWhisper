@@ -118,7 +118,7 @@ class TestTransformersEndToEnd:
 @pytest.mark.transformers
 class TestTransformersRepair:
     def test_repair_removes_loop(self, tf_engine, en_audio):
-        from crisperwhisper.hallucination import (
+        from crisperwhisper.loop_detection import (
             DEFAULT_REPAIR_THRESHOLDS,
             find_token_loop,
         )

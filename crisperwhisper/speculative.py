@@ -51,7 +51,7 @@ import ctranslate2
 import numpy as np
 
 from crisperwhisper import check_speculative_support
-from crisperwhisper.hallucination import (
+from crisperwhisper.loop_detection import (
     DEFAULT_REPAIR_THRESHOLDS,
     find_token_loop,
 )

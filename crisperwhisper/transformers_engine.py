@@ -760,7 +760,7 @@ class TransformersEngine:
                 suppress_tokens=suppress_tokens,
             )
 
-        from crisperwhisper.hallucination import (
+        from crisperwhisper.loop_detection import (
             DEFAULT_REPAIR_THRESHOLDS,
             find_token_loop,
         )
@@ -840,7 +840,7 @@ class TransformersEngine:
                 suppress_tokens=suppress_tokens,
             )
 
-        from crisperwhisper.hallucination import (
+        from crisperwhisper.loop_detection import (
             DEFAULT_REPAIR_THRESHOLDS,
             find_token_loop,
         )
