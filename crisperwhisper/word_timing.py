@@ -122,6 +122,95 @@ def group_tokens_into_words(
     return word_token_indices, word_texts
 
 
+SPACELESS_LANGUAGES = frozenset({"zh", "ja", "th", "lo", "my", "yue"})
+"""Languages written without spaces between words.
+
+For these, the space-boundary rule in :func:`group_tokens_into_words`
+degenerates into one giant "word" per utterance (issue #58), so
+:func:`extract_word_timings` groups at complete-unicode-codepoint
+boundaries instead — the same language set and strategy as OpenAI
+Whisper's ``split_tokens_on_unicode``.
+"""
+
+
+def group_tokens_into_words_unicode(
+    engine,
+    token_ids: List[int],
+    token_pieces: List[str],
+) -> Tuple[List[List[int]], List[str]]:
+    """Group tokens at complete-codepoint boundaries (space-less languages).
+
+    Multi-byte codepoints span BPE tokens, so tokens accumulate until the
+    span decodes without a U+FFFD replacement character; each complete
+    decode becomes one "word" (typically one or a few CJK characters —
+    the granularity OpenAI Whisper emits for these languages).  Special
+    and space-only tokens are excluded, as in
+    :func:`group_tokens_into_words`.
+    """
+    replacement = "�"
+
+    kept = [
+        i for i, (tid, piece) in enumerate(zip(token_ids, token_pieces))
+        if not _is_special_token(piece) and not _is_space_token(tid, piece)
+    ]
+    # Reference decode of everything kept, used to tell a genuine U+FFFD
+    # in the text apart from a partial-codepoint artifact.
+    full_text = engine.decode_tokens(
+        [int(token_ids[i]) for i in kept], skip_special=True,
+    )
+
+    word_token_indices: List[List[int]] = []
+    word_texts: List[str] = []
+    cur: List[int] = []
+    offset = 0
+
+    def flush(decoded: str) -> None:
+        nonlocal cur, offset
+        text = decoded.strip()
+        if text:
+            word_token_indices.append(list(cur))
+            word_texts.append(text)
+        cur = []
+        offset += len(decoded)
+
+    for i in kept:
+        cur.append(i)
+        decoded = engine.decode_tokens(
+            [int(token_ids[j]) for j in cur], skip_special=True,
+        )
+        pos = decoded.find(replacement)
+        if pos < 0 or (
+            offset + pos < len(full_text)
+            and full_text[offset + pos] == replacement
+        ):
+            flush(decoded)
+
+    if cur:
+        flush(engine.decode_tokens(
+            [int(token_ids[j]) for j in cur], skip_special=True,
+        ))
+    return word_token_indices, word_texts
+
+
+def segment_tokens_into_words(
+    engine,
+    token_ids: List[int],
+    token_pieces: List[str],
+    language: Optional[str] = None,
+) -> Tuple[List[List[int]], List[str]]:
+    """Language-aware token -> word segmentation dispatch.
+
+    Space-less languages (:data:`SPACELESS_LANGUAGES`) segment at
+    codepoint boundaries, everything else at space boundaries.  Callers
+    that mirror :func:`extract_word_timings`'s internal segmentation
+    (e.g. the token-LCS provenance mapping) must use this dispatcher so
+    both segmentations stay 1-to-1.
+    """
+    if language in SPACELESS_LANGUAGES:
+        return group_tokens_into_words_unicode(engine, token_ids, token_pieces)
+    return group_tokens_into_words(token_ids, token_pieces)
+
+
 def decode_word_texts(
     engine,
     token_ids: List[int],
@@ -439,6 +528,7 @@ def extract_word_timings(
     clip_to_audio: bool = False,
     split_gap_max_s: float = 0.1,
     keep_unplaceable: bool = False,
+    language: Optional[str] = None,
 ) -> List[WordTimestamp]:
     """Build a list of :class:`WordTimestamp`s from cross-attention.
 
@@ -520,6 +610,12 @@ def extract_word_timings(
         the placeable ``.start`` values. The placeable words' timings are
         identical in both modes (the same ``split_interword_gaps`` pass runs on
         them).
+    language
+        ISO 639-1 code of the transcription language. For space-less
+        languages (:data:`SPACELESS_LANGUAGES`) the word segmentation
+        switches from space boundaries to complete-codepoint boundaries
+        (:func:`group_tokens_into_words_unicode`); all other values (or
+        ``None``) keep the space-based segmentation.
 
     Returns
     -------
@@ -532,9 +628,13 @@ def extract_word_timings(
         return []
 
     # Tokens -> word groups (mirrors group_token_rows_into_words in
-    # evaluation/timing_extractors.py).
+    # evaluation/timing_extractors.py).  Space-less languages have no
+    # space boundaries to split on and would collapse into a single word
+    # (issue #58), so they group at codepoint boundaries instead.
     tok_pieces = [engine.tokenizer.decode([t]) for t in gen_ids]
-    word_token_indices, _ = group_tokens_into_words(gen_ids, tok_pieces)
+    word_token_indices, _ = segment_tokens_into_words(
+        engine, gen_ids, tok_pieces, language=language,
+    )
     if not word_token_indices:
         return []
     word_texts = decode_word_texts(engine, gen_ids, word_token_indices)

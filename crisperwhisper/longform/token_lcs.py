@@ -17,8 +17,8 @@ from crisperwhisper.prompt import strip_prompt_artifacts
 from crisperwhisper.result import ChunkResult, WordTimestamp
 from crisperwhisper.word_timing import (
     decode_word_texts,
-    group_tokens_into_words,
     monotonize_words,
+    segment_tokens_into_words,
 )
 
 if TYPE_CHECKING:
@@ -212,6 +212,7 @@ def token_lcs_transcribe_with_word_timestamps(
             engine, gen_ids, attention, mel,
             audio_duration_s=chunk_dur,
             keep_unplaceable=True,
+            language=prompt_builder.language,
         )
         chunk_word_ts.append(word_ts_local)
 
@@ -219,7 +220,9 @@ def token_lcs_transcribe_with_word_timestamps(
         # content token (by its position in ``gen_ids``) to its word index,
         # so provenance tags can be resolved to per-chunk word timings.
         tok_pieces = [engine.tokenizer.decode([t]) for t in gen_ids]
-        word_token_indices, _ = group_tokens_into_words(gen_ids, tok_pieces)
+        word_token_indices, _ = segment_tokens_into_words(
+            engine, gen_ids, tok_pieces, language=prompt_builder.language,
+        )
         mapping: dict[int, int] = {}
         for w_idx, tok_idxs in enumerate(word_token_indices):
             for k in tok_idxs:
@@ -251,8 +254,9 @@ def token_lcs_transcribe_with_word_timestamps(
     # Segment the merged token sequence into words and time each word from
     # its source-chunk Viterbi alignment via the provenance tags.
     merged_pieces = [engine.tokenizer.decode([t]) for t in merged_tokens]
-    merged_word_groups, _ = group_tokens_into_words(
-        merged_tokens, merged_pieces,
+    merged_word_groups, _ = segment_tokens_into_words(
+        engine, merged_tokens, merged_pieces,
+        language=prompt_builder.language,
     )
     merged_word_texts = decode_word_texts(engine, merged_tokens, merged_word_groups)
 

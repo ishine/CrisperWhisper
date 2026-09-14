@@ -289,6 +289,7 @@ def continuation_transcribe_with_word_timestamps(
             engine, gen_ids, attention, mel,
             audio_duration_s=chunk_dur,
             keep_unplaceable=True,
+            language=prompt_builder.language,
         )
 
         # Recover a context-conditioned early EOT (large_pro truncates at a
@@ -312,6 +313,7 @@ def continuation_transcribe_with_word_timestamps(
                     engine, gen_ids, attention, mel,
                     audio_duration_s=chunk_dur,
                     keep_unplaceable=True,
+                    language=prompt_builder.language,
                 )
 
         words = [wt.word for wt in word_ts_local]
@@ -525,6 +527,7 @@ def continuation_transcribe_dual(
                     engine, gen_ids, attention, mel,
                     audio_duration_s=chunk_dur,
                     keep_unplaceable=True,
+                    language=prompt_builder.language,
                 )
                 # Recover a context-conditioned early EOT for this row (mirrors
                 # the single-mode path).  The recovery re-decode is single-prompt,
@@ -546,6 +549,7 @@ def continuation_transcribe_dual(
                             engine, gen_ids, attention, mel,
                             audio_duration_s=chunk_dur,
                             keep_unplaceable=True,
+                            language=prompt_builder.language,
                         )
                 words = [wt.word for wt in word_ts_local]
             else:

@@ -228,6 +228,7 @@ def chunked_lcs_transcribe_with_word_timestamps(
             engine, gen_ids, attention, mel,
             audio_duration_s=chunk_dur,
             keep_unplaceable=True,
+            language=prompt_builder.language,
         )
 
         # Lift chunk-local timings into global audio time; unplaceable words

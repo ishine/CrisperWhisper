@@ -940,6 +940,7 @@ class CrisperWhisperModel:
             engine, gen_ids, attention, mel,
             audio_duration_s=audio_duration_s,
             blank_source="space",
+            language=language,
         )
         return text, words
 
@@ -1200,6 +1201,7 @@ class CrisperWhisperModel:
             words = extract_word_timings(
                 self._engine, gen_ids, attention, mel,
                 audio_duration_s=min(duration, 30.0),
+                language=language,
             )
         else:
             features = self._engine.extract_features(audio_array)
@@ -1376,6 +1378,7 @@ class CrisperWhisperModel:
             words = extract_word_timings(
                 engine, gen_ids, attention, mel,
                 audio_duration_s=audio_duration_s,
+                language=prompt_builder.language,
             )
             return text, words
 
@@ -1480,6 +1483,7 @@ class CrisperWhisperModel:
                 words = extract_word_timings(
                     engine, gen_ids, attention, mel,
                     audio_duration_s=audio_duration_s,
+                    language=prompt_builder.language,
                 )
             else:
                 words = []
