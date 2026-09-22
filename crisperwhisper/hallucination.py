@@ -67,6 +67,10 @@ def _argmax_with_bans(
 # ---------------------------------------------------------------------------
 
 from crisperwhisper.loop_detection import (  # noqa: E402,F401
+    DEGENERATE_TAIL_RATIO,
+    _block_thresholds,
+    _final_trim,
+    _unique_ngram_ratio,
     DEFAULT_REPAIR_THRESHOLDS,
     find_token_loop,
 )
@@ -282,23 +286,37 @@ def generate_with_repair(
         return out
 
     def _escape_and_continue(
-        prefix: list[int], ban: set[int], max_new: int,
+        prefix: list[int],
+        ban: set[int],
+        max_new: int,
+        context: list[int],
+        block: dict[int, int] | None,
     ) -> list[int]:
-        """Re-prefill, force one escape token, then continue freely.
+        """Re-prefill, force one escape token, then continue decoding.
 
         Shares the KV-cache state between the escape step and the
-        continuation so we don't re-prefill twice.
+        continuation so we don't re-prefill twice.  With *block* set,
+        the continuation runs under persistent consecutive-n-gram
+        blocking (see ``_block_thresholds``) so no over-threshold loop
+        can re-form; with ``None`` the continuation is free.
         """
         if max_new <= 0:
             return []
         state, logits = engine.model.prefill(encoded, prefix)
-        escape = _argmax_with_bans(logits, sup_ids, ban)
+        first_bans = set(ban)
+        if block is not None:
+            first_bans |= _compute_bans(context, block)
+        escape = _argmax_with_bans(logits, sup_ids, first_bans)
         if escape == eot:
             return [eot]
         out = [escape]
         for _ in range(max_new - 1):
             logits = engine.model.forward_step(state, out[-1])
-            tok = _argmax_with_bans(logits, sup_ids, None)
+            bans = (
+                _compute_bans(context + out, block)
+                if block is not None else None
+            )
+            tok = _argmax_with_bans(logits, sup_ids, bans)
             if tok == eot:
                 out.append(eot)
                 break
@@ -328,12 +346,35 @@ def generate_with_repair(
         )
 
         remaining = max_length - len(trimmed)
-        tail = _escape_and_continue(
-            prompt_tokens + trimmed, {gram[0]}, remaining,
+        # Attempt 1: one-step ban only (cheap, usually enough).  From
+        # attempt 2 the decoder has already absorbed an escape token into
+        # a mutated loop once, so continue under persistent blocking.
+        block = (
+            _block_thresholds(detect_reps, max_ngram) if attempt >= 2 else None
         )
+        if block is not None:
+            logger.info(
+                "Repair %d: continuing under persistent n-gram blocking",
+                attempt,
+            )
+        tail = _escape_and_continue(
+            prompt_tokens + trimmed, {gram[0]}, remaining, trimmed, block,
+        )
+        if block is not None:
+            ratio = _unique_ngram_ratio(tail)
+            if ratio < DEGENERATE_TAIL_RATIO:
+                # Blocking prevented exact loops but the decoder is still
+                # stuck, emitting near-copies.  Nothing salvageable in
+                # this tail: end the transcript at the loop onset.
+                logger.warning(
+                    "Blocked continuation still degenerate (unique 5-gram "
+                    "ratio %.2f); truncating at loop onset (%d tokens)",
+                    ratio, len(trimmed),
+                )
+                return trimmed, attempt
         generated = trimmed + tail
 
-    return generated, max_repairs
+    return _final_trim(generated, detect_reps, keep_reps), max_repairs
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +461,42 @@ def generate_with_repair_and_attention(
         )
         return all_rows[:len(generated_local)]
 
+    sup_arr = (
+        np.array(suppress_tokens, dtype=np.intp) if suppress_tokens else None
+    )
+
+    def _blocked_continue_with_attention(
+        prefix: list[int],
+        ban: set[int],
+        max_new: int,
+        context: list[int],
+        block: dict[int, int],
+    ) -> tuple[ctranslate2.WhisperDecoderState, list[int]]:
+        """Step-wise continuation under persistent n-gram blocking.
+
+        Attention rows accumulate in the returned state exactly like the
+        bulk path (prefill contributes the escape token's row, each
+        ``forward_step_with_attention`` the next token's), so
+        ``_finalize`` needs no special handling.  Per-step logits leave
+        the GPU — slower than the bulk C++ path, but this only runs after
+        a repair has already failed once.
+        """
+        state, logits, _attn0 = engine.prefill_with_attention(encoded, prefix)
+        first_bans = set(ban) | _compute_bans(context, block)
+        escape = _argmax_with_bans(logits, sup_arr, first_bans)
+        if escape == eot:
+            return state, [eot]
+        out = [escape]
+        for _ in range(max_new - 1):
+            logits, _attn = engine.forward_step_with_attention(state, out[-1])
+            bans = _compute_bans(context + out, block)
+            tok = _argmax_with_bans(logits, sup_arr, bans)
+            if tok == eot:
+                out.append(eot)
+                break
+            out.append(tok)
+        return state, out
+
     # --- Pass 1: bulk free decode (no bans) --------------------------
     state, generated = engine.generate_greedy_with_attention(
         encoded, prompt_tokens,
@@ -476,15 +553,48 @@ def generate_with_repair_and_attention(
             )
             return generated, attn, attempt
 
-        # Bulk re-decode of the tail, banning the loop starter on the
-        # first emitted step only.  All argmax / suppression /
-        # attention accumulation happens inside one C++ thread-pool job.
-        state, tail = engine.generate_greedy_with_attention(
-            encoded, prompt_tokens + trimmed,
-            max_new_tokens=remaining,
-            suppress_tokens=suppress_tokens,
-            ban_first_tokens=[gram[0]],
-        )
+        if attempt == 1:
+            # Bulk re-decode of the tail, banning the loop starter on the
+            # first emitted step only.  All argmax / suppression /
+            # attention accumulation happens inside one C++ thread-pool
+            # job.  Cheap, and usually one nudge is enough.
+            state, tail = engine.generate_greedy_with_attention(
+                encoded, prompt_tokens + trimmed,
+                max_new_tokens=remaining,
+                suppress_tokens=suppress_tokens,
+                ban_first_tokens=[gram[0]],
+            )
+        else:
+            # The one-step ban already failed once (the decoder absorbed
+            # the escape token into a mutated loop): re-decode the tail
+            # step-wise under persistent n-gram blocking, which makes
+            # re-forming any over-threshold loop impossible.
+            logger.info(
+                "Repair %d: continuing under persistent n-gram blocking",
+                attempt,
+            )
+            state, tail = _blocked_continue_with_attention(
+                prompt_tokens + trimmed, {gram[0]}, remaining, trimmed,
+                _block_thresholds(detect_reps, max_ngram),
+            )
+            ratio = _unique_ngram_ratio(tail)
+            if ratio < DEGENERATE_TAIL_RATIO:
+                # Blocking prevented exact loops but the decoder is still
+                # stuck, emitting near-copies.  Nothing salvageable in
+                # this tail: end the transcript at the loop onset
+                # (``kept_rows`` already covers exactly ``trimmed``).
+                logger.warning(
+                    "Blocked continuation still degenerate (unique 5-gram "
+                    "ratio %.2f); truncating at loop onset (%d tokens)",
+                    ratio, len(trimmed),
+                )
+                attn = (
+                    np.stack(kept_rows, axis=0)
+                    if kept_rows
+                    else np.zeros((0, 0), dtype=np.float32)
+                )
+                return trimmed, attn, attempt
         generated = trimmed + tail
 
+    generated = _final_trim(generated, detect_reps, keep_reps)
     return generated, _finalize(state, generated), max_repairs
